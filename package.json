@@ -1,0 +1,23 @@
+{
+  "name": "keyvaultx-monorepo",
+  "version": "1.0.0",
+  "description": "Open Source Secrets Management Platform",
+  "main": "apps/api/src/index.ts",
+  "scripts": {
+    "dev": "cd apps/api && npm run dev",
+    "build": "cd apps/api && npm run build",
+    "test": "cd apps/api && npm run test",
+    "lint": "cd apps/api && npm run lint",
+    "format": "prettier --write \"**/*.{ts,json,md}\""
+  },
+  "keywords": [
+    "secrets-management",
+    "open-source",
+    "vault-alternative"
+  ],
+  "author": "Anilkumar R Singh",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}

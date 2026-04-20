@@ -1,0 +1,191 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+enum Role {
+  USER
+  ADMIN
+  OWNER
+  SERVICE
+}
+
+// ==========================================
+// TENANTS (Logical Partitions)
+// ==========================================
+model Tenant {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Tenant-level settings (region, MFA policy, etc.)
+  settings    Json
+
+  // ─── Billing & Tier Enforcement ────────────────────────────────
+  billingTier      String  @default("FREE")    // FREE | PRO | ENTERPRISE
+  stripeCustomerId String? @unique             // Stripe integration hook
+  maxSecrets       Int     @default(100)       // Tier-enforced limit
+  maxIdentities    Int     @default(5)         // Tier-enforced limit
+
+  // Relations
+  memberships       UserTenant[]
+  secrets           Secret[]
+  auditLogs         AuditLog[]
+  machineIdentities MachineIdentity[]
+
+  @@index([slug])
+}
+
+// ==========================================
+// USERS (Human Access)
+// ==========================================
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+
+  // Backup recovery codes (hashed) — fallback when OTP email is unavailable
+  recoveryCodes String[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Many-to-many: a user can belong to multiple tenants
+  memberships UserTenant[]
+
+  // Secrets this user explicitly created
+  secrets     Secret[]
+}
+
+// ==========================================
+// USER-TENANT JUNCTION (Per-Tenant Roles)
+// ==========================================
+model UserTenant {
+  id       String @id @default(uuid())
+  userId   String @map("user_id")
+  tenantId String @map("tenant_id")
+  role     Role   @default(USER)
+
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  // A user can only have one membership per tenant
+  @@unique([userId, tenantId])
+  @@index([tenantId])
+  @@index([userId])
+}
+
+// ==========================================
+// MACHINE IDENTITIES (JSON Passports)
+// ==========================================
+model MachineIdentity {
+  id          String   @id @default(uuid())
+  name        String
+
+  // Scoping: e.g., ["prod:read", "dev:read", "staging:write"]
+  scopes      String[] 
+  
+  // SHA-256 hash of the raw Passport token (never stored in plaintext)
+  tokenHash   String   @unique 
+  
+  isActive    Boolean  @default(true)
+  expiresAt   DateTime?
+  
+  createdAt   DateTime @default(now())
+  lastUsedAt  DateTime?
+
+  // Revocation tracking — instant kill switch
+  revokedAt   DateTime?
+  revokedBy   String?
+
+  // Strict Row-Level Security Attachment
+  tenantId    String   @map("tenant_id")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tokenHash])
+}
+
+// ==========================================
+// SECRETS (AES-256-GCM Envelope Encrypted)
+// ==========================================
+model Secret {
+  id           String   @id @default(uuid())
+  name         String
+  
+  // Envelope Encryption:
+  // 1. A unique DEK (Data Encryption Key) encrypts `encryptedData`
+  // 2. The DEK itself is encrypted by the KEK (Key Encryption Key / Master Key)
+  // 3. Both the encrypted data and encrypted DEK are stored
+  encryptedData String
+  encryptedDek  String
+  algorithm     String   @default("AES-256-GCM")
+  iv            String
+  authTag       String
+  dekIv         String   @default("")
+  dekAuthTag    String   @default("")
+  
+  version      Int      @default(1)
+  
+  // Dynamic environment scoping (no enum restriction — supports custom envs)
+  environment  String   @map("environment")
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  isDeleted    Boolean  @default(false)
+  deletedAt    DateTime?
+  metadata     Json?
+  
+  // Strict Row-Level Security Attachment
+  tenantId     String   @map("tenant_id")
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  // Audit Trail: Who created it?
+  ownerId      String?
+  owner        User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  // A Tenant cannot have duplicate secret names within the same environment
+  @@unique([tenantId, environment, name]) 
+  @@index([tenantId, environment])
+}
+
+// ==========================================
+// AUDIT LOGS (Immutable & Compliance-Safe)
+// ==========================================
+model AuditLog {
+  id           String   @id @default(uuid())
+  
+  // Who performed the action? (Machine or Human)
+  actorId      String?  
+  actorType    String
+
+  action       String
+  
+  resourceType String
+  resourceId   String
+  
+  // NEVER log the actual secret value — only operational metadata
+  metadata     Json?    
+  
+  // HMAC Hash of previous entry for tamper detection
+  hmacHash     String?  
+  createdAt    DateTime @default(now())
+
+  // Nullable tenantId — audit records survive tenant deletion for compliance
+  tenantId     String?  @map("tenant_id")
+  tenant       Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+}

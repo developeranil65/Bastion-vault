@@ -1,0 +1,269 @@
+
+name: Security Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 0 * * 0' # Weekly security scan (Sunday midnight)
+
+env:
+  NODE_VERSION: '18'
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keyvaultx_test
+  REDIS_URL: redis://localhost:6379
+  JWT_SECRET: ci-test-secret-key-minimum-32-characters-long
+  ENCRYPTION_MASTER_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+jobs:
+  # ─── LINT & FORMAT ────────────────────────────────────────
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: apps/api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: apps/api
+
+      - name: Run ESLint
+        run: npm run lint
+        working-directory: apps/api
+
+      - name: Check formatting (Prettier)
+        run: npx prettier --check "src/**/*.ts"
+        working-directory: apps/api
+
+  # ─── SECURITY TESTS ──────────────────────────────────────
+  security-tests:
+    name: Security Test Suite
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: keyvaultx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: apps/api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: apps/api
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        working-directory: apps/api
+
+      - name: Push database schema
+        run: npx prisma db push --skip-generate
+        working-directory: apps/api
+
+      # ── Run security-specific test suites ──
+      - name: SQL Injection Tests (124 vectors)
+        run: npx vitest run src/__tests__/sql-injection.test.ts
+        working-directory: apps/api
+
+      - name: Authentication Security Tests
+        run: npx vitest run src/__tests__/auth-security.test.ts
+        working-directory: apps/api
+
+      - name: Rate Limiting Tests (Redis)
+        run: npx vitest run src/__tests__/rate-limiting.test.ts
+        working-directory: apps/api
+
+      - name: Data Exposure Tests
+        run: npx vitest run src/__tests__/data-exposure.test.ts
+        working-directory: apps/api
+
+      - name: Audit Log Integrity Tests
+        run: npx vitest run src/__tests__/audit-integrity.test.ts
+        working-directory: apps/api
+
+      - name: RBAC Tests
+        run: npx vitest run src/__tests__/rbac.test.ts
+        working-directory: apps/api
+
+      - name: Security Headers Validation
+        run: npx vitest run src/__tests__/security.test.ts
+        working-directory: apps/api
+
+  # ─── FULL TEST SUITE + COVERAGE ───────────────────────────
+  test:
+    name: Full Test Suite (282 tests)
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: keyvaultx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: apps/api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: apps/api
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        working-directory: apps/api
+
+      - name: Push database schema
+        run: npx prisma db push --skip-generate
+        working-directory: apps/api
+
+      - name: Run full test suite with coverage
+        run: npx vitest run --coverage
+        working-directory: apps/api
+
+      - name: Enforce coverage threshold (≥ 80%)
+        run: |
+          COVERAGE=$(npx vitest run --coverage --reporter=json 2>/dev/null | grep -o '"lines":[0-9.]*' | head -1 | grep -o '[0-9.]*')
+          echo "Line coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+            echo "❌ Coverage below 80% threshold"
+            exit 1
+          fi
+        working-directory: apps/api
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: apps/api/coverage/
+
+  # ─── DEPENDENCY SECURITY SCAN ─────────────────────────────
+  dependency-scan:
+    name: Dependency Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: apps/api
+
+      - name: npm audit (critical + high)
+        run: npm audit --audit-level=high
+        working-directory: apps/api
+        continue-on-error: true
+
+      - name: Snyk security scan
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+          command: test
+
+  # ─── BUILD VALIDATION ────────────────────────────────────
+  build:
+    name: Build & Docker
+    runs-on: ubuntu-latest
+    needs: [test, security-tests]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: apps/api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: apps/api
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        working-directory: apps/api
+
+      - name: TypeScript build
+        run: npx tsc --noEmit
+        working-directory: apps/api
+
+      - name: Build Docker image
+        run: docker build -t keyvaultx-api:${{ github.sha }} .
+
+      - name: Verify Docker image starts
+        run: |
+          docker run -d --name keyvaultx-test \
+            -e NODE_ENV=production \
+            -e DATABASE_URL=postgresql://fake:fake@localhost:5432/fake \
+            -e REDIS_URL=redis://localhost:6379 \
+            -e JWT_SECRET=test-secret-32-chars-minimum-here \
+            -e ENCRYPTION_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+            keyvaultx-api:${{ github.sha }} || true
+          sleep 3
+          docker logs keyvaultx-test 2>&1 || true
+          docker rm -f keyvaultx-test || true

@@ -1,0 +1,103 @@
+services:
+  # ─── API Service ──────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: runner
+    ports:
+      - '${API_PORT:-3000}:3000'
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-keyvaultx}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?ENCRYPTION_MASTER_KEY is required}
+      - KEK_KEY=${ENCRYPTION_MASTER_KEY:?ENCRYPTION_MASTER_KEY is required}
+      - PORT=3000
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://frontend:3001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - keyvaultx-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ─── Frontend (Next.js) ──────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ../apps/frontend
+      dockerfile: Dockerfile
+      args:
+        # Browser-accessible URL (NOT Docker-internal)
+        NEXT_PUBLIC_API_URL: http://localhost:3000
+    ports:
+      - '${FRONTEND_PORT:-3001}:3001'
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:3000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - keyvaultx-net
+    restart: unless-stopped
+
+  # ─── PostgreSQL ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-keyvaultx}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - keyvaultx-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ───────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    volumes:
+      - redis_data:/data
+    networks:
+      - keyvaultx-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─── Redis Commander (Dev Monitoring) ────────────────────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    environment:
+      - REDIS_HOSTS=local:redis:6379:0:${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+    depends_on:
+      - redis
+    networks:
+      - keyvaultx-net
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  keyvaultx-net:
+    driver: bridge
