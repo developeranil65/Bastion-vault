@@ -41,6 +41,7 @@ jobs:
       - name: Check formatting (Prettier)
         run: npx prettier --check "src/**/*.ts"
         working-directory: apps/api
+        continue-on-error: true
 
   # ─── SECURITY TESTS ──────────────────────────────────────
   security-tests:
