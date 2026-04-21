@@ -95,33 +95,17 @@ jobs:
         run: npx prisma db push --skip-generate
         working-directory: apps/api
 
-      # ── Run security-specific test suites ──
-      - name: SQL Injection Tests (124 vectors)
-        run: npx vitest run src/__tests__/sql-injection.test.ts
+      # ── Run security-specific test suites that exist in this repo ──
+      - name: Security: Input Hardening
+        run: npx vitest run test/security/input-hardening.test.ts
         working-directory: apps/api
 
-      - name: Authentication Security Tests
-        run: npx vitest run src/__tests__/auth-security.test.ts
+      - name: Security: Rate Limiting / DoS
+        run: npx vitest run test/security/rate-limit-ddos.test.ts
         working-directory: apps/api
 
-      - name: Rate Limiting Tests (Redis)
-        run: npx vitest run src/__tests__/rate-limiting.test.ts
-        working-directory: apps/api
-
-      - name: Data Exposure Tests
-        run: npx vitest run src/__tests__/data-exposure.test.ts
-        working-directory: apps/api
-
-      - name: Audit Log Integrity Tests
-        run: npx vitest run src/__tests__/audit-integrity.test.ts
-        working-directory: apps/api
-
-      - name: RBAC Tests
-        run: npx vitest run src/__tests__/rbac.test.ts
-        working-directory: apps/api
-
-      - name: Security Headers Validation
-        run: npx vitest run src/__tests__/security.test.ts
+      - name: Security: Tenant Isolation
+        run: npx vitest run test/security/tenant-isolation.test.ts
         working-directory: apps/api
 
   # ─── FULL TEST SUITE + COVERAGE ───────────────────────────
@@ -182,12 +166,7 @@ jobs:
 
       - name: Enforce coverage threshold (≥ 80%)
         run: |
-          COVERAGE=$(npx vitest run --coverage --reporter=json 2>/dev/null | grep -o '"lines":[0-9.]*' | head -1 | grep -o '[0-9.]*')
-          echo "Line coverage: ${COVERAGE}%"
-          if (( $(echo "$COVERAGE < 80" | bc -l) )); then
-            echo "❌ Coverage below 80% threshold"
-            exit 1
-          fi
+          node -e "const fs=require('fs');const p='coverage/coverage-summary.json';if(!fs.existsSync(p)){console.error('Missing coverage summary at '+p);process.exit(1);}const d=JSON.parse(fs.readFileSync(p,'utf8'));const lines=d.total?.lines?.pct;if(typeof lines!=='number'){console.error('Coverage lines pct unavailable');process.exit(1);}console.log('Line coverage: '+lines+'%');if(lines<80){console.error('Coverage below 80% threshold');process.exit(1);}"
         working-directory: apps/api
 
       - name: Upload coverage report
